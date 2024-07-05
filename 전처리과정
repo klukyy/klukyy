@@ -1,0 +1,93 @@
+with join_rn as (SELECT o.user_id,
+                      order_items_id,
+                      sess_created_at,
+                      order_created_at,
+                      shipped_at,
+                      session_id,
+                      event_id
+                FROM (select `org_data.events`.user_id,
+                      `org_data.events`.event_type,
+                      `org_data.events`.created_at `sess_created_at`,
+                      `org_data.events`.session_id,
+                      `org_data.events`.id `event_id`,
+                      row_number() over(partition by cast(`org_data.events`.user_id AS string) order by `org_data.events`.created_at) rn
+                      from `org_data.events`
+                      where `org_data.events`.event_type='purchase') e
+              inner join (select user_id,
+                        `org_data.order_items`.id `order_items_id`,
+                        `org_data.order_items`.created_at `order_created_at`,
+                        `org_data.order_items`.shipped_at `shipped_at`,
+                        row_number() over(partition by `org_data.order_items`.user_id order by `org_data.order_items`.created_at) rn
+                        from `org_data.order_items`) o
+              on e.user_id=o.user_id
+                and e.rn = o.rn
+)
+
+select 
+  uoe.* EXCEPT(`inventory_item_id`, `product_id`),
+  iv.id `inventory_item_id`,
+  iv.product_id,
+  iv.product_category `category`,
+  iv.product_brand `brand`,
+  iv.product_name,
+  CAST(iv.created_at AS DATE) `inventory_created_at`,
+  CAST(sold_at AS DATE) `inventory_sold_at`,
+  iv.cost
+from
+  (select 
+    uo.*,
+    oi.id `order_items_id`,
+    oi.product_id,
+    oi.inventory_item_id,
+    oi.status,
+    oi.sale_price,
+    oi.created_at `order_created_at`,
+    oi.shipped_at,
+    oi.delivered_at,
+    oi.returned_at,
+    e.id `event_id`,
+    e.session_id,
+    e.sequence_number,
+    e.user_id `login_user_id`,
+    e.created_at `sess_created_at`,
+    e.traffic_source `sess_traffic_source`,
+    e.uri,
+    e.event_type,
+    e.ip_address,
+    e.state `sess_state`,
+    e.city `sess_city`
+  from
+    (select u.id `user_id`,
+      u.age,
+      u.gender,
+      u.state `account_state`,
+      u.city `account_city`,
+      u.country `account_country`,
+      u.latitude,
+      u.longitude,
+      u.traffic_source `account_traffic_source`,
+      CAST(u.created_at AS DATE) `account_created_at`,
+      o.order_id,
+    FROM `org_data.users` u
+    FULL OUTER JOIN `org_data.orders` o
+        on o.user_id=u.id) uo
+  FULL OUTER JOIN `org_data.order_items` oi
+    on oi.user_id=uo.user_id and oi.order_id=uo.order_id
+  FULL OUTER JOIN join_rn
+    on join_rn.user_id=uo.user_id
+    and join_rn.order_items_id=oi.id
+  FULL OUTER JOIN `org_data.events` e
+    on (uo.user_id=e.user_id
+    and join_rn.event_id=e.id
+    and e.event_type='purchase')
+  where e.session_id not in (select session_id
+                          from join_rn
+                          where join_rn.shipped_at < join_rn.order_created_at)    --created_at 보다 과거인 shipped을 갖는 세션은 제거
+    and (
+        ((oi.shipped_at >= oi.created_at) or (oi.shipped_at is null))          --shipped 정보가 있으면 created_at 보다 클 경우인 주문만
+          or ((uo.account_created_at is null) and (e.created_at is not null))  --비회원, 세션만 존재
+        )
+    or ((uo.account_created_at is not null) and (oi.created_at is null))          --회원, 주문 null (세션 유무 상관없음)
+  ) uoe
+FULL OUTER JOIN `org_data.inventory_items` iv
+  on iv.id=uoe.inventory_item_id
